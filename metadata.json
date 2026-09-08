@@ -1,0 +1,6 @@
+{
+  "name": "Gestão de Atestados Médicos – DP e RH",
+  "description": "Leitura automatizada por OCR, organização, conferência e exportação de atestados médicos para uso em rotinas de Departamento Pessoal e RH.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
