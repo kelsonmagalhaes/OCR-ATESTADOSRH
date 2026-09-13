@@ -48,16 +48,38 @@ export const prepareImageForOcr = async (file: File): Promise<string> => {
     return fileToBase64(file);
   }
 
-  // Para imagens (JPEG, PNG, WEBP), otimiza para máxima precisão OCR e mínima latência
+  // Para imagens (JPEG, PNG, WEBP) até 8MB, envia a imagem pura original (100% de nitidez para Gemini Vision sem compressão de canvas)
+  if (file.size <= 8 * 1024 * 1024) {
+    try {
+      const b64 = await fileToBase64(file);
+      if (b64 && b64.length > 50) {
+        return b64;
+      }
+    } catch {
+      // Fallback para canvas
+    }
+  }
+
+  // Para imagens gigantescas (> 8MB), redimensiona proporcionalmente mantendo resolução ideal (até 3000px)
   return new Promise((resolve) => {
     const reader = new FileReader();
+    const safetyTimeout = setTimeout(async () => {
+      try {
+        const fallback = await fileToBase64(file);
+        resolve(fallback);
+      } catch {
+        resolve('');
+      }
+    }, 6000);
+
     reader.onload = (e) => {
       const img = new Image();
       img.onload = async () => {
+        clearTimeout(safetyTimeout);
         await yieldToMain();
         let width = img.width;
         let height = img.height;
-        const maxDimension = 2048; // Dimensão ideal para Gemini Vision: nitidez máxima de carimbos com 85% menos tráfego de rede
+        const maxDimension = 3000;
 
         if (width > maxDimension || height > maxDimension) {
           if (width > height) {
@@ -77,47 +99,32 @@ export const prepareImageForOcr = async (file: File): Promise<string> => {
           ctx.imageSmoothingEnabled = true;
           ctx.imageSmoothingQuality = 'high';
           ctx.drawImage(img, 0, 0, width, height);
-
-          // Leve realce de nitidez e contraste para manuscritos e carimbos
-          try {
-            const imgData = ctx.getImageData(0, 0, width, height);
-            const data = imgData.data;
-            let minLum = 255;
-            let maxLum = 0;
-            // Amostragem rápida (1 em cada 64 pixels)
-            for (let i = 0; i < data.length; i += 64) {
-              const lum = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
-              if (lum < minLum) minLum = lum;
-              if (lum > maxLum) maxLum = lum;
-            }
-
-            // Se o contraste for baixo (foto escura ou lavada), aplica estiramento de histograma
-            if (maxLum - minLum > 30 && (minLum > 40 || maxLum < 215)) {
-              const factor = 255 / (maxLum - minLum);
-              for (let i = 0; i < data.length; i += 4) {
-                data[i] = Math.min(255, Math.max(0, (data[i] - minLum) * factor));
-                data[i + 1] = Math.min(255, Math.max(0, (data[i + 1] - minLum) * factor));
-                data[i + 2] = Math.min(255, Math.max(0, (data[i + 2] - minLum) * factor));
-              }
-              ctx.putImageData(imgData, 0, 0);
-            }
-          } catch {
-            // Em caso de restrição de canvas, segue com a imagem padrão
-          }
-
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
-          // Libera contexto
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.94);
           canvas.width = 0;
           canvas.height = 0;
           resolve(dataUrl);
         } else {
-          resolve(e.target?.result as string);
+          resolve((e.target?.result as string) || '');
         }
       };
-      img.onerror = () => resolve(e.target?.result as string);
+      img.onerror = async () => {
+        clearTimeout(safetyTimeout);
+        try {
+          resolve(await fileToBase64(file));
+        } catch {
+          resolve('');
+        }
+      };
       img.src = e.target?.result as string;
     };
-    reader.onerror = () => resolve('');
+    reader.onerror = async () => {
+      clearTimeout(safetyTimeout);
+      try {
+        resolve(await fileToBase64(file));
+      } catch {
+        resolve('');
+      }
+    };
     reader.readAsDataURL(file);
   });
 };
@@ -315,6 +322,10 @@ export class AsyncBatchQueueEngine {
             this.workerStatusMap.delete(workerId);
             this.emitStats();
             await yieldToMain();
+            // Intervalo adaptativo de 1200ms entre documentos para respeitar limites de 15 RPM
+            if (this.nextItemIndex < this.items.length && this.isRunning && !this.isCancelled) {
+              await new Promise((r) => setTimeout(r, 1200));
+            }
           }
         }
 
@@ -435,28 +446,26 @@ export async function processSingleDocumentDirectly(
 
   if (isPdf) {
     await yieldToMain();
-    let arrayBuffer: ArrayBuffer | null = await item.file.arrayBuffer();
-    let pdfDoc: PDFDocument | null = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
-    totalDocPages = pdfDoc.getPageCount();
+    let arrayBuffer: ArrayBuffer | null = null;
+    let pdfDoc: PDFDocument | null = null;
+    try {
+      arrayBuffer = await item.file.arrayBuffer();
+      pdfDoc = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+      totalDocPages = pdfDoc.getPageCount();
+    } catch (pdfErr) {
+      console.warn('[PDF-Lib] Falha ao processar páginas com pdf-lib, utilizando envio direto do documento original:', pdfErr);
+      totalDocPages = 1;
+      pdfDoc = null;
+    }
 
-    for (let p = 0; p < totalDocPages; p++) {
-      if (checkCancelled && checkCancelled()) break;
-      if (checkPaused) {
-        await checkPaused();
-      }
-
-      const pageNum = p + 1;
+    if (totalDocPages === 1 || !pdfDoc) {
+      // PDF de página única: envia o arquivo original integralmente para garantir 100% de integridade vetorial e fontes
       if (onPageProgress) {
-        onPageProgress(pageNum, totalDocPages);
+        onPageProgress(1, 1);
       }
-
       await yieldToMain();
 
-      const subDoc = await PDFDocument.create();
-      const [copiedPage] = await subDoc.copyPages(pdfDoc, [p]);
-      subDoc.addPage(copiedPage);
-      const pageBase64 = await subDoc.saveAsBase64();
-
+      const pageBase64 = await fileToBase64(item.file);
       let pageData: any = null;
       let lastPageErr: any = null;
 
@@ -467,8 +476,8 @@ export async function processSingleDocumentDirectly(
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               fileName: item.name,
-              pageNumber: pageNum,
-              totalPages: totalDocPages,
+              pageNumber: 1,
+              totalPages: 1,
               base64Data: pageBase64,
               fileType: 'application/pdf',
               forceRefresh: true,
@@ -506,16 +515,16 @@ export async function processSingleDocumentDirectly(
       if (pageData && pageData.registro) {
         returnedRecords.push(pageData.registro);
         if (pageData.isIlegivel) {
-          paginasIlegiveis.push(pageNum);
+          paginasIlegiveis.push(1);
         }
         if (pageData.quotaNotice) {
           summaryError = 'Limite de taxa/cota atingido no Gemini. Registro preservado para preenchimento manual.';
         }
       } else {
-        paginasIlegiveis.push(pageNum);
-        const errDetail = lastPageErr ? lastPageErr.message : 'Falha na leitura da página';
+        paginasIlegiveis.push(1);
+        const errDetail = lastPageErr ? lastPageErr.message : 'Falha na leitura do PDF';
         returnedRecords.push({
-          id: `rec-falha-${Date.now()}-${pageNum}-${Math.random().toString(36).substring(2, 6)}`,
+          id: `rec-falha-${Date.now()}-1-${Math.random().toString(36).substring(2, 6)}`,
           funcionario: 'Revisar nome',
           dias: 'Revisar quantidade',
           data: 'Revisar data',
@@ -524,19 +533,116 @@ export async function processSingleDocumentDirectly(
           horario: '-',
           local: 'A conferir',
           profissional: 'A conferir',
-          observacao: `Atenção: Não foi possível realizar OCR automático nesta página (${errDetail}). Preencher manualmente.`,
+          observacao: `Atenção: Não foi possível realizar OCR automático no documento (${errDetail}). Preencher manualmente.`,
           arquivoOrigem: item.name,
-          paginaOrigem: pageNum,
+          paginaOrigem: 1,
           status: 'revisar',
           motivoRevisao: `Leitura incompleta: ${errDetail}. Conferência manual requerida.`,
           confiancaOcr: 30,
           dataProcessamento: new Date().toISOString(),
         });
       }
+    } else {
+      // PDF de múltiplas páginas: fatia página por página
+      for (let p = 0; p < totalDocPages; p++) {
+        if (checkCancelled && checkCancelled()) break;
+        if (checkPaused) {
+          await checkPaused();
+        }
 
-      if (p < totalDocPages - 1) {
+        const pageNum = p + 1;
+        if (onPageProgress) {
+          onPageProgress(pageNum, totalDocPages);
+        }
+
         await yieldToMain();
-        await new Promise((r) => setTimeout(r, 800));
+
+        const subDoc = await PDFDocument.create();
+        const [copiedPage] = await subDoc.copyPages(pdfDoc, [p]);
+        subDoc.addPage(copiedPage);
+        const pageBase64 = await subDoc.saveAsBase64();
+
+        let pageData: any = null;
+        let lastPageErr: any = null;
+
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const pageResponse = await fetch('/api/ocr/process-page', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                fileName: item.name,
+                pageNumber: pageNum,
+                totalPages: totalDocPages,
+                base64Data: pageBase64,
+                fileType: 'application/pdf',
+                forceRefresh: true,
+              }),
+            });
+
+            if (pageResponse.status === 429 || pageResponse.status >= 500) {
+              const errData = await pageResponse.json().catch(() => ({}));
+              lastPageErr = new Error(errData.error || `HTTP ${pageResponse.status}`);
+              if (attempt < 3) {
+                await new Promise((r) => setTimeout(r, 2500));
+                continue;
+              }
+            }
+
+            if (!pageResponse.ok) {
+              const errData = await pageResponse.json().catch(() => ({}));
+              lastPageErr = new Error(errData.error || `Erro HTTP ${pageResponse.status}`);
+              if (attempt < 3) {
+                await new Promise((r) => setTimeout(r, 1200));
+                continue;
+              }
+            } else {
+              pageData = await pageResponse.json();
+              break;
+            }
+          } catch (e: any) {
+            lastPageErr = e;
+            if (attempt < 3) {
+              await new Promise((r) => setTimeout(r, 1500));
+            }
+          }
+        }
+
+        if (pageData && pageData.registro) {
+          returnedRecords.push(pageData.registro);
+          if (pageData.isIlegivel) {
+            paginasIlegiveis.push(pageNum);
+          }
+          if (pageData.quotaNotice) {
+            summaryError = 'Limite de taxa/cota atingido no Gemini. Registro preservado para preenchimento manual.';
+          }
+        } else {
+          paginasIlegiveis.push(pageNum);
+          const errDetail = lastPageErr ? lastPageErr.message : 'Falha na leitura da página';
+          returnedRecords.push({
+            id: `rec-falha-${Date.now()}-${pageNum}-${Math.random().toString(36).substring(2, 6)}`,
+            funcionario: 'Revisar nome',
+            dias: 'Revisar quantidade',
+            data: 'Revisar data',
+            cid: 'Não informado',
+            tipoDocumento: 'Atestado Médico',
+            horario: '-',
+            local: 'A conferir',
+            profissional: 'A conferir',
+            observacao: `Atenção: Não foi possível realizar OCR automático nesta página (${errDetail}). Preencher manualmente.`,
+            arquivoOrigem: item.name,
+            paginaOrigem: pageNum,
+            status: 'revisar',
+            motivoRevisao: `Leitura incompleta: ${errDetail}. Conferência manual requerida.`,
+            confiancaOcr: 30,
+            dataProcessamento: new Date().toISOString(),
+          });
+        }
+
+        if (p < totalDocPages - 1) {
+          await yieldToMain();
+          await new Promise((r) => setTimeout(r, 800));
+        }
       }
     }
 
@@ -545,6 +651,16 @@ export async function processSingleDocumentDirectly(
   } else {
     await yieldToMain();
     const base64Data = await prepareImageForOcr(item.file);
+
+    // Identificação precisa do MIME Type real dos dados base64
+    let resolvedMime = item.type || 'image/jpeg';
+    if (base64Data.startsWith('data:')) {
+      const match = base64Data.match(/^data:([^;]+);base64,/);
+      if (match && match[1]) {
+        resolvedMime = match[1];
+      }
+    }
+    if (resolvedMime === 'image/jpg') resolvedMime = 'image/jpeg';
 
     let pageData: any = null;
     let lastImgErr: any = null;
@@ -559,7 +675,7 @@ export async function processSingleDocumentDirectly(
             pageNumber: 1,
             totalPages: 1,
             base64Data,
-            fileType: item.type || 'image/jpeg',
+            fileType: resolvedMime,
             forceRefresh: true,
           }),
         });

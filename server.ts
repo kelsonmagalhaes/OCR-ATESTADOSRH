@@ -53,45 +53,47 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-const SYSTEM_OCR_PROMPT = `Você é um perito em leitura e extração de dados de atestados médicos, declarações de comparecimento e relatórios de saúde para Departamento Pessoal (DP) e Recursos Humanos (RH) da empresa Verdent.
-Sua missão é realizar OCR minucioso, analisando todas as páginas do documento (PDF nativo, escaneado, fotos ou manuscritos), extraindo com máxima fidelidade os dados solicitados.
+const SYSTEM_OCR_PROMPT = `Você é um perito em leitura e extração de dados de atestados médicos, declarações de comparecimento e relatórios de saúde para Departamento Pessoal (DP) e Recursos Humanos (RH) no Brasil.
+Sua missão é realizar OCR minucioso, analisando todas as páginas do documento (PDF nativo, fotos de celulares, documentos escaneados ou manuscritos), extraindo com máxima fidelidade os dados solicitados.
 
-REGRAS RÍGIDAS DE NEGÓCIO:
-1. Nome do Funcionário (funcionario):
-   - Extraia o nome completo do paciente/colaborador identificado no documento.
-   - Corrija apenas erros evidentes de OCR e preserve acentos.
-   - Se o nome não puder ser identificado com segurança ou estiver ilegível, preencha estritamente com: "Revisar nome".
+DIRETRIZES DE LEITURA E DECODIFICAÇÃO DE ATESTADOS BRASILEIROS:
+1. Nome do Funcionário / Paciente (funcionario):
+   - Extraia o nome completo do paciente/colaborador beneficiário do atestado.
+   - Pistas no documento: procure por "Atesto que o(a) Sr(a)", "Paciente:", "ao Sr.", "Nome:", "em favor de", "colaborador(a)".
+   - NUNCA confunda o nome do paciente com o nome do médico emitente (Dr./Dra.) nem com a razão social da clínica/hospital.
+   - Decifre abreviações ou caligrafia cursiva fazendo o melhor esforço fonético e contextual da língua portuguesa.
+   - Somente preencha "Revisar nome" se o campo estiver completamente cortado, inacessível ou invisível.
 
-2. Quantidade de Dias (dias):
-   - Quantidade total de dias de afastamento (ex: "1 dia", "2 dias", "3 dias", "5 dias", "15 dias").
-   - Se o documento informar período inicial e final (ex: de 03/08 a 05/08), calcule o total de dias (no exemplo: "3 dias").
-   - Se houver somente comparecimento, presença em consulta ou liberação por horas/período de turno, registre estritamente: "Comparecimento".
-   - Se a quantidade não puder ser identificada, informe: "Revisar quantidade".
+2. Quantidade de Dias de Afastamento (dias):
+   - Quantidade total de dias de repouso/afastamento (ex: "1 dia", "2 dias", "3 dias", "5 dias", "15 dias").
+   - Converta números por extenso para dígitos (ex: "um dia" -> "1 dia", "três dias" -> "3 dias", "10 (dez) dias" -> "10 dias").
+   - Se houver período de datas (ex: "de 10/05 a 12/05"), calcule a quantidade inclusiva de dias (3 dias).
+   - Se for declaração de horas, consulta rápida ou exame sem afastamento de dias inteiros, registre estritamente: "Comparecimento".
+   - Se ilegível ou ausente, "Revisar quantidade".
 
 3. Data do Atestado (data):
    - Data principal de emissão, atendimento ou assinatura do atestado.
-   - Exibir SEMPRE no formato DD/MM/AAAA.
-   - Se houver mais de uma data, priorizar a data de atendimento/emissão.
-   - Se a data não puder ser identificada, informe: "Revisar data".
+   - Exibir SEMPRE no formato DD/MM/AAAA. Converta datas por extenso (ex: "14 de março de 2024" -> "14/03/2024").
+   - Se ilegível ou ausente, "Revisar data".
 
-4. CID (cid):
-   - Extraia o código CID informado (ex: "M54.5", "J06.9", "B34.2", "K29.7", "Z76.3").
-   - Preserve letras, números, pontos e demais caracteres.
-   - CASO NÃO EXISTA CID NO DOCUMENTO (ou médico não preencheu), PREENCHA ESTRITAMENTE COM: "Não informado".
-   - NUNCA crie, deduza ou sugira um CID que não esteja visível no documento!
+4. Código CID (cid):
+   - Extraia o código CID informado (ex: "M54.5", "J06.9", "B34.2", "K29.7", "Z76.3", "A09").
+   - Normalize hífens para pontos (ex: M54-5 -> M54.5).
+   - CASO NÃO CONSTE CID NO DOCUMENTO (médico não anotou ou paciente não autorizou), PREENCHA ESTRITAMENTE COM: "Não informado".
+   - NUNCA invente ou deduza um código CID se ele não estiver escrito no papel.
 
-5. CAMPOS DETALHADOS:
-   - tipoDocumento: "Atestado Médico", "Declaração de Comparecimento", "Atestado Odontológico", "Atestado de Acompanhante", etc.
-   - horario: Horário da consulta/atendimento se informado (ex: "08:30 às 11:00"), ou "-" se não houver.
-   - local: Hospital, UPA, Clínica, Posto de Saúde, ou "-" se não houver.
-   - profissional: Nome do médico/dentista e CRM/CRO com UF se informado (ex: "Dr. Marcos Silva - CRM 12345/SP").
-   - observacao: Observações clínicas relevantes (ex: repouso, sem restrições, etc.).
-   - paginaOrigem: Número da página em que o atestado se encontra (1, 2, 3...).
+5. DEMAIS CAMPOS:
+   - tipoDocumento: "Atestado Médico", "Declaração de Comparecimento", "Atestado Odontológico", "Atestado de Acompanhante" ou "Atestado Digital de Afastamento".
+   - horario: Horário da consulta/atendimento (ex: "08:00 às 11:30") ou "-" se não houver.
+   - local: Hospital, UPA, UBS, Posto de Saúde, Clínica ou "-" se não constar.
+   - profissional: Nome do médico/dentista e CRM/CRO com UF (ex: "Dr. Marcos Silva - CRM 12345/SP").
+   - observacao: Observações clínicas relevantes anotadas no atestado.
 
-6. CONFERÊNCIA E SEGURANÇA:
-   - status: "aprovado" (se todos os campos principais foram lidos com certeza), "revisar" (se algum campo ficou incerto), "incompleto", ou "baixa_confianca" (se documento borrado/manuscrito de difícil leitura).
-   - motivoRevisao: Descreva com clareza o motivo de dúvida ou se alguma informação ficou incompleta.
-   - confiancaOcr: Número de 0 a 100 indicando a precisão da leitura.`;
+6. CONFERÊNCIA E INTEGRIDADE:
+   - status: "aprovado" (se todos os campos principais foram identificados com certeza) ou "revisar" (se houver dúvida em algum campo).
+   - motivoRevisao: Se houver dúvida ou caligrafia difícil, descreva o motivo com clareza.
+   - confiancaOcr: Número de 0 a 100 indicando a precisão da leitura.
+   - isInvalidoOuIlegivel: Marque como true APENAS se a página for uma folha completamente em branco, imagem preta corrompida ou não tiver nenhum atestado/declaração de saúde. Se houver atestado, mesmo manuscrito ou de difícil leitura, marque como false e extraia tudo o que puder decifrar.`;
 
 // Helper robusto para executar OCR em uma única página com fallback resiliente e controle de cota
 async function performPageOCR(params: {
@@ -103,7 +105,18 @@ async function performPageOCR(params: {
   totalPaginas: number;
   forceRefresh?: boolean;
 }) {
-  const { ai, cleanBase64, mimeType, fileName, pagina, totalPaginas, forceRefresh } = params;
+  const { ai, cleanBase64, fileName, pagina, totalPaginas, forceRefresh } = params;
+
+  // Detecção inteligente e normalização do MIME Type
+  let mimeType = params.mimeType || 'application/pdf';
+  if (mimeType === 'image/jpg') mimeType = 'image/jpeg';
+  if (cleanBase64.startsWith('/9j/')) mimeType = 'image/jpeg';
+  else if (cleanBase64.startsWith('iVBORw')) mimeType = 'image/png';
+  else if (cleanBase64.startsWith('JVBERi')) mimeType = 'application/pdf';
+  else if (fileName.toLowerCase().endsWith('.pdf')) mimeType = 'application/pdf';
+  else if (fileName.toLowerCase().endsWith('.png')) mimeType = 'image/png';
+  else if (fileName.toLowerCase().endsWith('.jpg') || fileName.toLowerCase().endsWith('.jpeg')) mimeType = 'image/jpeg';
+  else if (fileName.toLowerCase().endsWith('.webp')) mimeType = 'image/webp';
 
   // Verificação de cache por hash SHA-256 (resposta instantânea em 0ms se a página já foi processada)
   const pageHash = crypto.createHash('sha256').update(cleanBase64).digest('hex');
@@ -126,29 +139,26 @@ async function performPageOCR(params: {
 
   const pagePrompt = `Analise a página ${pagina} de ${totalPaginas} do documento "${fileName}".
 Identifique e extraia o atestado médico, odontológico ou declaração de saúde presente nesta página.
-Diretrizes Rigorosas de Leitura:
-1. funcionario: Nome COMPLETO do colaborador/paciente. Separe claramente do nome do médico ou da clínica. Se não conseguir ler com segurança, preencha estritamente com "Revisar nome".
-2. dias: Quantidade total de dias de afastamento (ex: "1 dia", "2 dias", "3 dias", "15 dias"). Converta números por extenso (ex: "cinco dias" -> "5 dias"). Se for declaração de horas/consulta sem afastamento de dias inteiros, registre estritamente: "Comparecimento". Se ilegível, "Revisar quantidade".
-3. data: Data do atestado no formato DD/MM/AAAA. Se ilegível, "Revisar data".
-4. cid: Código CID visível (ex: "M54.5", "J06.9", "B34.2"). Normalize hífens para pontos (ex: M54-5 -> M54.5). Se NÃO constar CID no documento, preencha estritamente com: "Não informado". NUNCA deduza ou invente CID.
-5. tipoDocumento: "Atestado Médico", "Atestado Odontológico", "Declaração de Comparecimento", "Atestado de Doação de Sangue" ou "Atestado Digital de Afastamento".
-6. horario: Horário da consulta/atendimento (ex: "08:00 às 11:30") ou "-" se não constar.
-7. local: Nome da unidade de saúde (Hospital, UPA, UBS, Clínica) ou "-".
-8. profissional: Nome do médico/dentista e CRM/CRO com UF (ex: "Dr. Marcos Silva - CRM 12345/SP").
-9. observacao: Observações adicionais relevantes.
-10. status: "aprovado" (se todos os campos principais foram identificados com certeza) ou "revisar" (se algo estiver ilegível/duvidoso).
-11. motivoRevisao: Se houver dúvida ou caligrafia ilegível, descreva o motivo com clareza.
-12. confiancaOcr: Número de 0 a 100 indicando a precisão da leitura.
-13. isInvalidoOuIlegivel: true se a página estiver completamente borrada, preta, branca ou sem atestado legível.`;
+Faça o máximo esforço para decifrar caligrafia médica, carimbos e campos impressos.
+Extraia:
+- funcionario: Nome completo do paciente
+- dias: Quantidade de dias de afastamento (ex: "3 dias") ou "Comparecimento"
+- data: Data do atendimento/emissão em DD/MM/AAAA
+- cid: Código CID visível (ex: "M54.5") ou "Não informado"
+- tipoDocumento: Tipo do atestado
+- horario, local, profissional, observacao
+- status: "aprovado" ou "revisar"
+- motivoRevisao, confiancaOcr (0-100)
+- isInvalidoOuIlegivel: true APENAS se a folha estiver 100% em branco ou não contiver nenhum atestado.`;
 
-  // Hierarquia de modelos recomendados pelo Gemini SDK:
-  // 1. gemini-3.1-flash-lite: Alta cota diária e máxima velocidade no Free Tier
-  // 2. gemini-3.8-flash: Modelo padrão para tarefas de texto e visão
-  // 3. gemini-flash-latest: Alias oficial para o Flash mais recente
+  // Modelos recomendados em ordem de robustez e disponibilidade:
+  // 1. gemini-3.6-flash: Máxima precisão visual e alta disponibilidade
+  // 2. gemini-3.1-flash-lite: Extremamente veloz e com alta cota de requisições
+  // 3. gemini-3.8-flash: Fallback adicional
   const modelsToTry = [
+    'gemini-3.6-flash',
     'gemini-3.1-flash-lite',
     'gemini-3.8-flash',
-    'gemini-flash-latest',
   ];
 
   let pageData: any = null;
@@ -156,9 +166,98 @@ Diretrizes Rigorosas de Leitura:
   let quotaExhausted = false;
 
   for (const modelName of modelsToTry) {
+    let attempts = 0;
+    const maxAttemptsForModel = 2;
+
+    while (attempts < maxAttemptsForModel && !pageData) {
+      attempts++;
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: [
+            {
+              parts: [
+                {
+                  inlineData: {
+                    data: cleanBase64,
+                    mimeType: mimeType,
+                  },
+                },
+                {
+                  text: pagePrompt,
+                },
+              ],
+            },
+          ],
+          config: {
+            systemInstruction: SYSTEM_OCR_PROMPT,
+            temperature: 0.1,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                isInvalidoOuIlegivel: { type: Type.BOOLEAN },
+                motivoIlegibilidade: { type: Type.STRING },
+                funcionario: { type: Type.STRING },
+                dias: { type: Type.STRING },
+                data: { type: Type.STRING },
+                cid: { type: Type.STRING },
+                tipoDocumento: { type: Type.STRING },
+                horario: { type: Type.STRING },
+                local: { type: Type.STRING },
+                profissional: { type: Type.STRING },
+                observacao: { type: Type.STRING },
+                status: { type: Type.STRING },
+                motivoRevisao: { type: Type.STRING },
+                confiancaOcr: { type: Type.INTEGER },
+              },
+              required: ['funcionario', 'dias', 'data', 'cid', 'tipoDocumento', 'status'],
+            },
+          },
+        });
+
+        if (response && response.text) {
+          pageData = JSON.parse(response.text);
+          break;
+        }
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = err.message || '';
+        const is429 =
+          errMsg.includes('429') ||
+          err.status === 429 ||
+          errMsg.includes('RESOURCE_EXHAUSTED') ||
+          errMsg.includes('Quota exceeded');
+        const is503 = errMsg.includes('503') || err.status === 503 || errMsg.includes('UNAVAILABLE');
+
+        console.log(
+          `[OCR Engine] Página ${pagina} no modelo ${modelName} tentativa ${attempts}/${maxAttemptsForModel} (${is429 ? 'Rate-limit 429' : is503 ? 'High demand 503' : errMsg.substring(0, 60)})`
+        );
+
+        if (is429) {
+          quotaExhausted = true;
+          // Pausa adaptativa de backoff para restabelecer a cota
+          await new Promise((r) => setTimeout(r, 2800));
+        } else if (is503) {
+          // Erro 503 temporário do modelo: tenta próximo modelo
+          await new Promise((r) => setTimeout(r, 800));
+          break;
+        } else {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+      }
+    }
+
+    if (pageData) break;
+  }
+
+  // Se a cota ainda estiver esgotada após tentar todos os modelos, realiza uma tentativa de resgate final
+  if (!pageData && quotaExhausted) {
+    console.log(`[OCR Engine] Tentando resgate com gemini-3.1-flash-lite após pausa na página ${pagina}...`);
     try {
-      const response = await ai.models.generateContent({
-        model: modelName,
+      await new Promise((r) => setTimeout(r, 3500));
+      const rescueResponse = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
         contents: [
           {
             parts: [
@@ -200,72 +299,34 @@ Diretrizes Rigorosas de Leitura:
           },
         },
       });
-
-      if (response && response.text) {
-        pageData = JSON.parse(response.text);
-        break;
+      if (rescueResponse && rescueResponse.text) {
+        pageData = JSON.parse(rescueResponse.text);
       }
-    } catch (err: any) {
-      lastError = err;
-      const errMsg = err.message || '';
-      const is429 =
-        errMsg.includes('429') ||
-        err.status === 429 ||
-        errMsg.includes('RESOURCE_EXHAUSTED') ||
-        errMsg.includes('Quota exceeded');
-      console.log(
-        `[OCR Engine] Página ${pagina} no modelo ${modelName} (${is429 ? 'Rate-limit/Quota 429' : 'Tentando próximo'})`
-      );
-
-      if (is429) {
-        quotaExhausted = true;
-        // Pausa de backoff para restabelecer a cota de RPM/TPM do Gemini
-        await new Promise((r) => setTimeout(r, 2200));
-      } else {
-        await new Promise((r) => setTimeout(r, 400));
-      }
+    } catch {
+      // Resgate falhou, mantém registro de contingência
     }
   }
 
-  // Se a cota estiver esgotada, criar registro resiliente com aviso claro para o DP (sem derrubar o lote com erro 500)
-  if (!pageData && quotaExhausted) {
-    console.log(`[OCR Engine] Cota de IA esgotada na página ${pagina}. Criando registro para conferência manual.`);
-    return {
-      record: {
-        id: `rec-quota-${Date.now()}-${pagina}-${Math.random().toString(36).substring(2, 6)}`,
-        funcionario: 'Revisar nome',
-        dias: 'Revisar quantidade',
-        data: 'Revisar data',
-        cid: 'Não informado',
-        tipoDocumento: 'Atestado Médico',
-        horario: '-',
-        local: 'A conferir',
-        profissional: 'A conferir',
-        observacao: `Atenção: Limite temporário de requisições da IA atingido. O atestado da página ${pagina} foi registrado com segurança para preenchimento manual pelo DP.`,
-        arquivoOrigem: fileName,
-        paginaOrigem: pagina,
-        status: 'revisar' as const,
-        motivoRevisao: 'Cota de requisições temporariamente esgotada no Google Gemini (Erro 429). Necessita preenchimento/conferência manual.',
-        confiancaOcr: 50,
-        dataProcessamento: new Date().toISOString(),
-      },
-      isIlegivel: false,
-      motivoIlegivel: '',
-      quotaNotice: true,
-    };
-  }
+  // Verifica se há dados extraídos aproveitáveis na resposta da IA
+  const hasExtractedData = Boolean(
+    pageData &&
+      ((pageData.funcionario && pageData.funcionario !== 'Revisar nome' && pageData.funcionario.trim().length > 2) ||
+        (pageData.dias && pageData.dias !== 'Revisar quantidade') ||
+        (pageData.data && pageData.data !== 'Revisar data') ||
+        (pageData.cid && pageData.cid !== 'Não informado'))
+  );
 
-  // Se a página for ilegível ou a IA falhou por outro motivo
-  if (!pageData || pageData.isInvalidoOuIlegivel) {
+  // Se a IA não retornou nada ou é uma página verdadeiramente vazia/em branco sem nenhum dado
+  if (!pageData || (Boolean(pageData.isInvalidoOuIlegivel) && !hasExtractedData)) {
     const motivo =
       pageData?.motivoIlegibilidade ||
-      (lastError ? `Falha de leitura: ${lastError.message?.substring(0, 100)}` : 'Caligrafia ilegível ou documento sem nitidez');
+      (lastError ? `Falha de leitura: ${lastError.message?.substring(0, 100)}` : 'Folha sem atestado legível ou caligrafia inacessível');
     return {
       record: {
         id: `rec-falha-${Date.now()}-${pagina}-${Math.random().toString(36).substring(2, 6)}`,
         funcionario: pageData?.funcionario && pageData.funcionario !== 'Revisar nome' ? pageData.funcionario : 'Revisar nome',
-        dias: pageData?.dias || 'Revisar quantidade',
-        data: pageData?.data || 'Revisar data',
+        dias: pageData?.dias && pageData.dias !== 'Revisar quantidade' ? pageData.dias : 'Revisar quantidade',
+        data: pageData?.data && pageData.data !== 'Revisar data' ? pageData.data : 'Revisar data',
         cid: pageData?.cid || 'Não informado',
         tipoDocumento: pageData?.tipoDocumento || 'Atestado Médico',
         horario: pageData?.horario || '-',
@@ -276,12 +337,12 @@ Diretrizes Rigorosas de Leitura:
         paginaOrigem: pagina,
         status: 'revisar' as const,
         motivoRevisao: motivo,
-        confiancaOcr: 40,
+        confiancaOcr: 35,
         dataProcessamento: new Date().toISOString(),
       },
       isIlegivel: true,
       motivoIlegivel: motivo,
-      quotaNotice: false,
+      quotaNotice: quotaExhausted,
     };
   }
 
